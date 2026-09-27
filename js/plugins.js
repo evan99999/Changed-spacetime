@@ -9,5 +9,6 @@ var $plugins =
 {"name":"EnemyHpBar","status":true,"description":"敵人血量條顯示","parameters":{}},
 {"name":"ItemStack9999","status":false,"description":"物品堆疊上限9999","parameters":{}},
 {"name":"EnemyHp100Million","status":false,"description":"敵人最大HP上限100000000","parameters":{}},
-{"name":"BattleMotionSystem4","status":false,"description":"BattleMotionSystem 4.2 - 選定敵人後實際移動攻擊","parameters":{}}
+{"name":"BattleMotionSystem4","status":false,"description":"BattleMotionSystem 4.2 - 選定敵人後實際移動攻擊","parameters":{}},
+{"name":"AlchemyRefine","status":true,"description":"裝備煉化與完整技能動畫施放系統","parameters":{"預設煉化金幣":"1000"}}
 ];
