@@ -11,5 +11,5 @@ var $plugins =
 {"name":"EnemyHp100Million","status":false,"description":"敵人最大HP上限100000000","parameters":{}},
 {"name":"BattleMotionSystem4","status":false,"description":"BattleMotionSystem 4.2 - 選定敵人後實際移動攻擊","parameters":{}},
 {"name":"AlchemyRefine","status":true,"description":"裝備煉化與完整技能動畫施放系統","parameters":{"預設煉化金幣":"1000"}},
-{"name":"TowerOfSaviorsParty","status":true,"description":"仿神魔之塔風格的卡片式隊伍編組介面","parameters":{}}
+{"name":"TowerOfSaviorsParty","status":true,"description":"仿神魔之塔風格的卡片式隊伍編組介面 (強制4人上限 + 可點擊類別選單)","parameters":{"MaxCols":"4","CardSize":"96","MaxPartyMembers":"5","ExcludedActorIds":"163","AwakeningSkillMap":"","DefaultAwakeningSkills":"","HookFormation":"true"}}
 ];

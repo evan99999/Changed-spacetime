@@ -1,32 +1,513 @@
 /*:
- * @plugindesc 仿神魔之塔風格的卡片式隊伍編組介面
+ * @plugindesc 仿神魔之塔風格的卡片式隊伍編組介面 (強制4人上限 + 可點擊類別選單)
  * @author 你的名字
  *
  * @param MaxCols
- * @text 每行顯示卡片數
- * @desc 在角色背包網格中，每行要顯示幾張卡片。
+ * @text 背包每行卡片數
+ * @desc 下方角色背包網格，每行顯示幾張卡片。
+ * @type number
+ * @default 5
+ *
+ * @param CardSize
+ * @text 卡片方塊大小
+ * @desc 每張角色卡片的寬高像素（建議 84 ~ 112）。
+ * @type number
+ * @default 96
+ *
+ * @param MaxPartyMembers
+ * @text 隊伍上限人數
+ * @desc 戰鬥上場人數上限（固定 4 人，含隊長）。
  * @type number
  * @default 4
  *
- * @param IconSize
- * @text 卡片尺寸大小
- * @desc 角色頭像卡片的顯示大小 (預設 96)。
- * @type number
- * @default 96
+ * @param ExcludedActorIds
+ * @text 自動剔除角色ID清單
+ * @desc 開啟背包時自動排除的角色 ID，以逗號分隔（預設 163）。
+ * @type string
+ * @default 163
+ *
+ * @param AwakeningSkillMap
+ * @text 覺醒判定技能對應表
+ * @desc 填入「角色ID:技能ID」以逗號分隔，例如：42:120,43:125。只要角色學會該技能即視為「已覺醒」。
+ * @type string
+ * @default
+ *
+ * @param DefaultAwakeningSkills
+ * @text 通用覺醒技能ID清單
+ * @desc 若未在上方個別指定，只要角色學會任一個此處列出的技能 ID（逗號分隔），也會視為已覺醒。
+ * @type string
+ * @default
+ *
+ * @param HookFormation
+ * @text 取代主選單「隊形」
+ * @desc 選擇「隊形」時直接開啟神魔風隊伍編組（true / false）。
+ * @type boolean
+ * @default true
  *
  * @help
  * ----------------------------------------------------------------------------
  * 【使用說明】
- * 本外掛將 RMMV 預設的隊伍與成員選擇介面改造成類似手遊的卡片網格背包風格。
- * 適合擁有大量角色（50+以上）的專案，方便玩家直覺點擊與編排隊伍。
+ * 1. 隊伍上限固定為 4 人（隊長 + 隊員2 + 隊員3 + 隊員4）。
+ * 2. 點擊右上角「類別：... [點擊切換類別]」可展開選單：
+ *    入手時間、攻擊力、防禦力、生命力、魔法攻擊力、已覺醒、未覺醒。
+ * 3. 點擊上方「隊長 / 隊員2~4」可切換要調整的格位；
+ *    點擊下方卡片可將角色指派到該格位（已在隊伍者會互換）。
+ * 4. 開啟背包時自動剔除角色 ID 163（馬拉•具善）。
  * ----------------------------------------------------------------------------
  */
 
 (function() {
     var parameters = PluginManager.parameters('TowerOfSaviorsParty');
-    var maxCols = Number(parameters['MaxCols'] || 4);
-    var iconSize = Number(parameters['IconSize'] || 96);
+    var maxCols = Number(parameters['MaxCols'] || 5);
+    var cardSize = Number(parameters['CardSize'] || 96);
+    // 強制上限 4 人（確保即使舊參數殘留也不會變成 5 人）
+    var rawMaxParty = Number(parameters['MaxPartyMembers']);
+    var maxParty = (rawMaxParty > 0 && rawMaxParty <= 4) ? rawMaxParty : 4;
+    if (!parameters['MaxPartyMembers']) {
+        maxParty = 4;
+    }
+    maxParty = 4;
 
+    var excludedRaw = String(parameters['ExcludedActorIds'] || '163');
+    var awakenMapRaw = String(parameters['AwakeningSkillMap'] || '');
+    var defaultAwakenSkillsRaw = String(parameters['DefaultAwakeningSkills'] || '');
+    var hookFormation = String(parameters['HookFormation'] || 'true') === 'true';
+
+    var CATEGORY_MODES = [
+        { key: 'obtain',     label: '入手時間' },
+        { key: 'atk',        label: '攻擊力' },
+        { key: 'def',        label: '防禦力' },
+        { key: 'mhp',        label: '生命力' },
+        { key: 'mat',        label: '魔法攻擊力' },
+        { key: 'awakened',   label: '已覺醒' },
+        { key: 'unawakened', label: '未覺醒' }
+    ];
+
+    function parseExcludedIds() {
+        return excludedRaw.split(',')
+            .map(function(s) { return Number(s.trim()); })
+            .filter(function(n) { return !isNaN(n) && n > 0; });
+    }
+
+    function parseSkillIdList(raw) {
+        if (!raw || !raw.trim()) return [];
+        return raw.split(',')
+            .map(function(s) { return Number(s.trim()); })
+            .filter(function(n) { return !isNaN(n) && n > 0; });
+    }
+
+    function parseAwakeningSkillMap() {
+        var map = {};
+        if (!awakenMapRaw.trim()) return map;
+        awakenMapRaw.split(',').forEach(function(pair) {
+            var parts = pair.split(':');
+            if (parts.length === 2) {
+                var actorId = Number(parts[0].trim());
+                var skillId = Number(parts[1].trim());
+                if (actorId > 0 && skillId > 0) {
+                    map[actorId] = skillId;
+                }
+            }
+        });
+        return map;
+    }
+
+    var EXCLUDED_IDS = parseExcludedIds();
+    var AWAKENING_SKILL_MAP = parseAwakeningSkillMap();
+    var DEFAULT_AWAKEN_SKILLS = parseSkillIdList(defaultAwakenSkillsRaw);
+
+    function isExcludedActor(actorId) {
+        return EXCLUDED_IDS.indexOf(actorId) !== -1;
+    }
+
+    function actorHasSkill(actor, skillId) {
+        if (!actor || !skillId) return false;
+        return actor.isLearnedSkill(skillId) || actor.skills().some(function(sk) {
+            return sk && sk.id === skillId;
+        });
+    }
+
+    function isActorAwakened(actor) {
+        if (!actor) return false;
+        var actorId = actor.actorId();
+        var dataActor = $dataActors[actorId];
+
+        if (AWAKENING_SKILL_MAP[actorId]) {
+            return actorHasSkill(actor, AWAKENING_SKILL_MAP[actorId]);
+        }
+
+        if (dataActor && dataActor.note) {
+            var match = dataActor.note.match(/<AwakenSkill:\s*(\d+)>/i);
+            if (match && match[1]) {
+                return actorHasSkill(actor, Number(match[1]));
+            }
+            if (/<awakened>|<已覺醒>/i.test(dataActor.note)) {
+                return true;
+            }
+        }
+
+        if (DEFAULT_AWAKEN_SKILLS.length > 0) {
+            for (var i = 0; i < DEFAULT_AWAKEN_SKILLS.length; i++) {
+                if (actorHasSkill(actor, DEFAULT_AWAKEN_SKILLS[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        return actor.skills().some(function(sk) {
+            return sk && sk.name && sk.name.indexOf('覺醒') !== -1;
+        });
+    }
+
+    function isPointInsideWindow(win, x, y) {
+        if (!win || !win.visible) return false;
+        return x >= win.x && x <= win.x + win.width &&
+               y >= win.y && y <= win.y + win.height;
+    }
+
+    // ------------------------------------------------------------------------
+    // 擴充 Game_Party
+    // ------------------------------------------------------------------------
+    var _Game_Party_initialize = Game_Party.prototype.initialize;
+    Game_Party.prototype.initialize = function() {
+        _Game_Party_initialize.call(this);
+        this._tosOwnedActors = [];
+        this._tosCategoryKey = 'obtain';
+    };
+
+    Game_Party.prototype.tosCategoryKey = function() {
+        return this._tosCategoryKey || 'obtain';
+    };
+
+    Game_Party.prototype.setTosCategoryKey = function(key) {
+        this._tosCategoryKey = key;
+    };
+
+    Game_Party.prototype.cleanupExcludedActors = function() {
+        var self = this;
+        if (!this._tosOwnedActors) {
+            this._tosOwnedActors = [];
+        }
+
+        this._tosOwnedActors = this._tosOwnedActors.filter(function(id) {
+            return !isExcludedActor(id);
+        });
+
+        this._actors.forEach(function(actorId) {
+            if (!isExcludedActor(actorId) && self._tosOwnedActors.indexOf(actorId) === -1) {
+                self._tosOwnedActors.push(actorId);
+            }
+        });
+
+        this._actors = this._actors.filter(function(actorId) {
+            return !isExcludedActor(actorId);
+        });
+
+        while (this._actors.length > maxParty) {
+            this._actors.pop();
+        }
+    };
+
+    Game_Party.prototype.tosOwnedActors = function() {
+        this.cleanupExcludedActors();
+        return this._tosOwnedActors.slice();
+    };
+
+    Game_Party.prototype.unlockTosActor = function(actorId) {
+        if (isExcludedActor(actorId)) return;
+        this.cleanupExcludedActors();
+        if ($dataActors[actorId] && this._tosOwnedActors.indexOf(actorId) === -1) {
+            this._tosOwnedActors.push(actorId);
+        }
+    };
+
+    Game_Party.prototype.lockTosActor = function(actorId) {
+        this.cleanupExcludedActors();
+        var idx = this._tosOwnedActors.indexOf(actorId);
+        if (idx !== -1) {
+            this._tosOwnedActors.splice(idx, 1);
+        }
+        var partyIdx = this._actors.indexOf(actorId);
+        if (partyIdx !== -1 && this._actors.length > 1) {
+            this._actors.splice(partyIdx, 1);
+        }
+    };
+
+    var _Game_Party_addActor = Game_Party.prototype.addActor;
+    Game_Party.prototype.addActor = function(actorId) {
+        if (isExcludedActor(actorId)) return;
+        this.unlockTosActor(actorId);
+        _Game_Party_addActor.call(this, actorId);
+        while (this._actors.length > maxParty) {
+            this._actors.pop();
+        }
+    };
+
+    // ------------------------------------------------------------------------
+    // 1. 類別切換列視窗
+    // ------------------------------------------------------------------------
+    function Window_TOSCategoryBar() {
+        this.initialize.apply(this, arguments);
+    }
+
+    Window_TOSCategoryBar.prototype = Object.create(Window_Base.prototype);
+    Window_TOSCategoryBar.prototype.constructor = Window_TOSCategoryBar;
+
+    Window_TOSCategoryBar.prototype.initialize = function(x, y, width, height) {
+        Window_Base.prototype.initialize.call(this, x, y, width, height);
+        this.refresh();
+    };
+
+    Window_TOSCategoryBar.prototype.refresh = function() {
+        this.contents.clear();
+        var key = $gameParty.tosCategoryKey();
+        var mode = CATEGORY_MODES.find(function(m) { return m.key === key; }) || CATEGORY_MODES[0];
+
+        var w = this.contentsWidth();
+        var h = this.contentsHeight();
+
+        this.contents.fillRect(4, 4, w - 8, h - 8, 'rgba(45, 65, 105, 0.92)');
+        this.contents.fontSize = 18;
+        this.changeTextColor('#ffd700');
+        this.drawText('▼ 類別：' + mode.label + ' [點此切換]', 12, Math.floor((h - 24) / 2), w - 24, 'center');
+    };
+
+    // ------------------------------------------------------------------------
+    // 2. 類別選單視窗（7 個指定項目）
+    // ------------------------------------------------------------------------
+    function Window_TOSCategoryMenu() {
+        this.initialize.apply(this, arguments);
+    }
+
+    Window_TOSCategoryMenu.prototype = Object.create(Window_Command.prototype);
+    Window_TOSCategoryMenu.prototype.constructor = Window_TOSCategoryMenu;
+
+    Window_TOSCategoryMenu.prototype.initialize = function(x, y, width) {
+        this._menuWidth = width || 230;
+        Window_Command.prototype.initialize.call(this, x, y);
+        this.hide();
+        this.deactivate();
+    };
+
+    Window_TOSCategoryMenu.prototype.windowWidth = function() {
+        return this._menuWidth;
+    };
+
+    Window_TOSCategoryMenu.prototype.makeCommandList = function() {
+        var currentKey = $gameParty.tosCategoryKey();
+        CATEGORY_MODES.forEach(function(m) {
+            var prefix = (m.key === currentKey) ? '★ ' : '';
+            this.addCommand(prefix + m.label, m.key, true);
+        }, this);
+    };
+
+    // ------------------------------------------------------------------------
+    // 3. 上方：目前隊伍欄位視窗（固定 4 人）
+    // ------------------------------------------------------------------------
+    function Window_TOSPartySlots() {
+        this.initialize.apply(this, arguments);
+    }
+
+    Window_TOSPartySlots.prototype = Object.create(Window_Selectable.prototype);
+    Window_TOSPartySlots.prototype.constructor = Window_TOSPartySlots;
+
+    Window_TOSPartySlots.prototype.initialize = function(x, y, width, height) {
+        Window_Selectable.prototype.initialize.call(this, x, y, width, height);
+        this._selectedSlot = 0;
+        this.refresh();
+    };
+
+    Window_TOSPartySlots.prototype.maxCols = function() {
+        return 4;
+    };
+
+    Window_TOSPartySlots.prototype.maxItems = function() {
+        return 4;
+    };
+
+    Window_TOSPartySlots.prototype.itemWidth = function() {
+        return Math.floor((this.contentsWidth() - this.spacing() * 3) / 4);
+    };
+
+    Window_TOSPartySlots.prototype.itemHeight = function() {
+        return this.contentsHeight();
+    };
+
+    Window_TOSPartySlots.prototype.spacing = function() {
+        return 12;
+    };
+
+    Window_TOSPartySlots.prototype.drawItem = function(index) {
+        var rect = this.itemRectForText(index);
+        var actor = $gameParty.members()[index] || null;
+
+        this.contents.fillRect(rect.x, rect.y, rect.width, rect.height, 'rgba(30, 35, 50, 0.85)');
+        if (index === this._selectedSlot) {
+            this.contents.fillRect(rect.x, rect.y, rect.width, 4, '#ffd700');
+            this.contents.fillRect(rect.x, rect.y + rect.height - 4, rect.width, 4, '#ffd700');
+        }
+
+        this.contents.fontSize = 16;
+        this.changeTextColor(index === 0 ? '#ffd700' : this.normalColor());
+        var roleLabel = (index === 0) ? '隊長' : ('隊員 ' + (index + 1));
+        this.drawText(roleLabel, rect.x + 6, rect.y + 4, rect.width - 12, 'left');
+
+        if (actor) {
+            var faceSize = Math.min(rect.width - 16, rect.height - 48, cardSize);
+            var faceX = rect.x + Math.floor((rect.width - faceSize) / 2);
+            var faceY = rect.y + 24;
+            this.drawFace(actor.faceName(), actor.faceIndex(), faceX, faceY, faceSize, faceSize);
+
+            this.contents.fontSize = 16;
+            this.changeTextColor(this.normalColor());
+            this.drawText(actor.name(), rect.x + 4, rect.y + rect.height - 24, rect.width - 8, 'center');
+        } else {
+            this.contents.fontSize = 18;
+            this.changeTextColor(this.normalColor());
+            this.drawText('空位', rect.x, rect.y + Math.floor(rect.height / 2) - 10, rect.width, 'center');
+        }
+    };
+
+    Window_TOSPartySlots.prototype.selectedSlot = function() {
+        return this._selectedSlot;
+    };
+
+    Window_TOSPartySlots.prototype.setSelectedSlot = function(slot) {
+        this._selectedSlot = Math.max(0, Math.min(3, slot));
+        this.refresh();
+    };
+
+    // ------------------------------------------------------------------------
+    // 4. 下方：神魔風卡片網格背包視窗
+    // ------------------------------------------------------------------------
+    function Window_TOSActorGrid() {
+        this.initialize.apply(this, arguments);
+    }
+
+    Window_TOSActorGrid.prototype = Object.create(Window_Selectable.prototype);
+    Window_TOSActorGrid.prototype.constructor = Window_TOSActorGrid;
+
+    Window_TOSActorGrid.prototype.initialize = function(x, y, width, height) {
+        this._actorIds = this.buildFilteredSortedActorIds();
+        Window_Selectable.prototype.initialize.call(this, x, y, width, height);
+        this.refresh();
+        if (this.maxItems() > 0) {
+            this.select(0);
+        }
+        this.activate();
+    };
+
+    Window_TOSActorGrid.prototype.buildFilteredSortedActorIds = function() {
+        var ownedIds = $gameParty.tosOwnedActors();
+        var category = $gameParty.tosCategoryKey();
+
+        var list = ownedIds.filter(function(id) {
+            var actor = $gameActors.actor(id);
+            if (!actor) return false;
+            if (category === 'awakened') {
+                return isActorAwakened(actor);
+            }
+            if (category === 'unawakened') {
+                return !isActorAwakened(actor);
+            }
+            return true;
+        });
+
+        if (category === 'atk') {
+            list.sort(function(a, b) {
+                return $gameActors.actor(b).atk - $gameActors.actor(a).atk;
+            });
+        } else if (category === 'def') {
+            list.sort(function(a, b) {
+                return $gameActors.actor(b).def - $gameActors.actor(a).def;
+            });
+        } else if (category === 'mhp') {
+            list.sort(function(a, b) {
+                return $gameActors.actor(b).mhp - $gameActors.actor(a).mhp;
+            });
+        } else if (category === 'mat') {
+            list.sort(function(a, b) {
+                return $gameActors.actor(b).mat - $gameActors.actor(a).mat;
+            });
+        }
+
+        return list;
+    };
+
+    Window_TOSActorGrid.prototype.refresh = function() {
+        this._actorIds = this.buildFilteredSortedActorIds();
+        Window_Selectable.prototype.refresh.call(this);
+        if (this.maxItems() === 0) {
+            this.select(-1);
+        } else if (this.index() < 0 || this.index() >= this.maxItems()) {
+            this.select(0);
+        }
+    };
+
+    Window_TOSActorGrid.prototype.maxCols = function() {
+        return maxCols;
+    };
+
+    Window_TOSActorGrid.prototype.maxItems = function() {
+        return this._actorIds ? this._actorIds.length : 0;
+    };
+
+    Window_TOSActorGrid.prototype.spacing = function() {
+        return 12;
+    };
+
+    Window_TOSActorGrid.prototype.itemWidth = function() {
+        return cardSize + 12;
+    };
+
+    Window_TOSActorGrid.prototype.itemHeight = function() {
+        return cardSize + 34;
+    };
+
+    Window_TOSActorGrid.prototype.drawItem = function(index) {
+        var actorId = this._actorIds[index];
+        var actor = $gameActors.actor(actorId);
+        if (!actor) return;
+
+        var rect = this.itemRect(index);
+        var isInParty = $gameParty.members().some(function(m) {
+            return m.actorId() === actorId;
+        });
+
+        this.contents.fillRect(
+            rect.x + 4,
+            rect.y + 4,
+            rect.width - 8,
+            rect.height - 8,
+            isInParty ? 'rgba(255, 190, 40, 0.25)' : 'rgba(25, 28, 38, 0.85)'
+        );
+
+        var drawW = Math.min(cardSize, rect.width - 16);
+        var drawH = Math.min(cardSize, rect.height - 36);
+        var fx = rect.x + Math.floor((rect.width - drawW) / 2);
+        var fy = rect.y + 8;
+        this.drawFace(actor.faceName(), actor.faceIndex(), fx, fy, drawW, drawH);
+
+        if (isInParty) {
+            this.contents.fillRect(rect.x + rect.width - 54, rect.y + 8, 46, 20, 'rgba(0, 0, 0, 0.75)');
+            this.contents.fontSize = 13;
+            this.changeTextColor('#ffd700');
+            this.drawText('使用中', rect.x + rect.width - 54, rect.y + 6, 46, 'center');
+        }
+
+        this.contents.fontSize = 15;
+        this.changeTextColor(isInParty ? '#ffd700' : this.normalColor());
+        this.drawText('Lv.' + actor.level + ' ' + actor.name(), rect.x + 6, rect.y + rect.height - 24, rect.width - 12, 'center');
+    };
+
+    Window_TOSActorGrid.prototype.currentActorId = function() {
+        return this._actorIds[this.index()] || null;
+    };
+
+    // ------------------------------------------------------------------------
+    // 5. 整合場景 Scene_TOSParty（支援滑鼠/觸控直接點擊）
+    // ------------------------------------------------------------------------
     function Scene_TOSParty() {
         this.initialize.apply(this, arguments);
     }
@@ -36,27 +517,211 @@
 
     Scene_TOSParty.prototype.initialize = function() {
         Scene_MenuBase.prototype.initialize.call(this);
+        $gameParty.cleanupExcludedActors();
     };
 
     Scene_TOSParty.prototype.create = function() {
         Scene_MenuBase.prototype.create.call(this);
+        this.createHelpWindow();
+        this.createCategoryBarWindow();
         this.createPartySlotsWindow();
-        this.createActorGridView();
+        this.createActorGridWindow();
+        this.createCategoryMenuWindow();
+        this.updateHelpText();
+    };
+
+    Scene_TOSParty.prototype.createCategoryBarWindow = function() {
+        var wy = this._helpWindow.height;
+        var wh = 56;
+        var bw = Math.min(320, Math.floor(Graphics.boxWidth * 0.45));
+        var bx = Graphics.boxWidth - bw;
+        this._categoryBar = new Window_TOSCategoryBar(bx, wy, bw, wh);
+        this.addWindow(this._categoryBar);
     };
 
     Scene_TOSParty.prototype.createPartySlotsWindow = function() {
-        // 上方隊伍 5 個位置的繪製邏輯
+        var wy = this._categoryBar.y + this._categoryBar.height;
+        var wh = 185;
+        this._slotsWindow = new Window_TOSPartySlots(0, wy, Graphics.boxWidth, wh);
+        this._slotsWindow.setHandler('ok', this.onSlotOk.bind(this));
+        this._slotsWindow.setHandler('cancel', this.popScene.bind(this));
+        this._slotsWindow.deactivate();
+        this.addWindow(this._slotsWindow);
     };
 
-    Scene_TOSParty.prototype.createActorGridView = function() {
-        // 下方角色背包網格邏輯 (可使用 maxCols 與 iconSize 參數)
+    Scene_TOSParty.prototype.createActorGridWindow = function() {
+        var wy = this._slotsWindow.y + this._slotsWindow.height;
+        var wh = Graphics.boxHeight - wy;
+        this._gridWindow = new Window_TOSActorGrid(0, wy, Graphics.boxWidth, wh);
+        this._gridWindow.setHandler('ok', this.onGridOk.bind(this));
+        this._gridWindow.setHandler('cancel', this.popScene.bind(this));
+        this.addWindow(this._gridWindow);
     };
 
-    var _Alias_Game_Interpreter_pluginCommand = Game_Interpreter.prototype.pluginCommand;
+    Scene_TOSParty.prototype.createCategoryMenuWindow = function() {
+        var mw = 230;
+        var mx = Math.max(0, Graphics.boxWidth - mw - 8);
+        var my = this._categoryBar.y + this._categoryBar.height;
+        this._categoryMenu = new Window_TOSCategoryMenu(mx, my, mw);
+        this._categoryMenu.setHandler('cancel', this.closeCategoryMenu.bind(this));
+
+        CATEGORY_MODES.forEach(function(m) {
+            this._categoryMenu.setHandler(m.key, this.onCategorySelect.bind(this, m.key));
+        }, this);
+
+        this.addWindow(this._categoryMenu);
+    };
+
+    Scene_TOSParty.prototype.update = function() {
+        Scene_MenuBase.prototype.update.call(this);
+
+        if (TouchInput.isTriggered()) {
+            var tx = TouchInput.x;
+            var ty = TouchInput.y;
+
+            // 若類別選單已展開
+            if (this._categoryMenu && this._categoryMenu.visible && this._categoryMenu.active) {
+                if (!isPointInsideWindow(this._categoryMenu, tx, ty)) {
+                    this.closeCategoryMenu();
+                    return;
+                }
+            } else {
+                // 點擊右上角類別切換條
+                if (isPointInsideWindow(this._categoryBar, tx, ty)) {
+                    this.openCategoryMenu();
+                    return;
+                }
+
+                // 點擊上方 4 格隊伍位
+                if (isPointInsideWindow(this._slotsWindow, tx, ty)) {
+                    var localX = tx - this._slotsWindow.x - this._slotsWindow.padding;
+                    var itemW = this._slotsWindow.itemWidth() + this._slotsWindow.spacing();
+                    var clickedSlot = Math.floor(localX / itemW);
+                    if (clickedSlot >= 0 && clickedSlot < 4) {
+                        this._slotsWindow.select(clickedSlot);
+                        this._slotsWindow.setSelectedSlot(clickedSlot);
+                        this._gridWindow.activate();
+                        this.updateHelpText();
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    Scene_TOSParty.prototype.openCategoryMenu = function() {
+        this._gridWindow.deactivate();
+        this._slotsWindow.deactivate();
+        this._categoryMenu.refresh();
+        this._categoryMenu.show();
+        this._categoryMenu.activate();
+        this._categoryMenu.select(0);
+    };
+
+    Scene_TOSParty.prototype.closeCategoryMenu = function() {
+        this._categoryMenu.hide();
+        this._categoryMenu.deactivate();
+        this._gridWindow.activate();
+    };
+
+    Scene_TOSParty.prototype.onCategorySelect = function(key) {
+        $gameParty.setTosCategoryKey(key);
+        this._categoryBar.refresh();
+        this._gridWindow.refresh();
+        this.closeCategoryMenu();
+        this.updateHelpText();
+    };
+
+    Scene_TOSParty.prototype.updateHelpText = function() {
+        var slot = this._slotsWindow.selectedSlot();
+        var roleText = (slot === 0) ? '隊長位' : ('隊員第 ' + (slot + 1) + ' 格');
+        var shownCount = this._gridWindow ? this._gridWindow.maxItems() : 0;
+        var catKey = $gameParty.tosCategoryKey();
+        var catObj = CATEGORY_MODES.find(function(m) { return m.key === catKey; }) || CATEGORY_MODES[0];
+        this._helpWindow.setText(
+            '目標：【' + roleText + '】（上限 4 人）｜類別：' + catObj.label + '（顯示 ' + shownCount + ' 位）'
+        );
+    };
+
+    Scene_TOSParty.prototype.onGridOk = function() {
+        $gameParty.cleanupExcludedActors();
+        var targetActorId = this._gridWindow.currentActorId();
+        var targetSlot = this._slotsWindow.selectedSlot();
+        if (!targetActorId || isExcludedActor(targetActorId)) {
+            this._gridWindow.refresh();
+            this._gridWindow.activate();
+            return;
+        }
+
+        var members = $gameParty.members()
+            .map(function(a) { return a.actorId(); })
+            .filter(function(id) { return !isExcludedActor(id); })
+            .slice(0, 4);
+
+        var existingIndex = members.indexOf(targetActorId);
+
+        if (existingIndex !== -1) {
+            if (targetSlot < members.length) {
+                var temp = members[targetSlot];
+                members[targetSlot] = members[existingIndex];
+                members[existingIndex] = temp;
+            }
+        } else {
+            if (targetSlot < members.length) {
+                members[targetSlot] = targetActorId;
+            } else if (members.length < 4) {
+                members.push(targetActorId);
+            } else {
+                members[members.length - 1] = targetActorId;
+            }
+        }
+
+        members = members.slice(0, 4);
+
+        if (members.length > 0) {
+            while ($gameParty.members().length > 0) {
+                $gameParty.removeActor($gameParty.members()[0].actorId());
+            }
+            members.forEach(function(id) {
+                if (!isExcludedActor(id)) {
+                    $gameParty.addActor(id);
+                }
+            });
+        }
+
+        this._slotsWindow.refresh();
+        this._gridWindow.refresh();
+        this.updateHelpText();
+        this._gridWindow.activate();
+    };
+
+    Scene_TOSParty.prototype.onSlotOk = function() {
+        this._slotsWindow.setSelectedSlot(this._slotsWindow.index());
+        this._slotsWindow.deactivate();
+        this._gridWindow.activate();
+        this.updateHelpText();
+    };
+
+    // ------------------------------------------------------------------------
+    // 6. 掛載到主選單「隊形」與外掛指令
+    // ------------------------------------------------------------------------
+    if (hookFormation) {
+        Scene_Menu.prototype.commandFormation = function() {
+            SceneManager.push(Scene_TOSParty);
+        };
+    }
+
+    var _Game_Interpreter_pluginCommand = Game_Interpreter.prototype.pluginCommand;
     Game_Interpreter.prototype.pluginCommand = function(command, args) {
-        _Alias_Game_Interpreter_pluginCommand.call(this, command, args);
+        _Game_Interpreter_pluginCommand.call(this, command, args);
         if (command === 'OpenTOSParty') {
             SceneManager.push(Scene_TOSParty);
+        } else if (command === 'UnlockTOSActor') {
+            var id = Number(args[0]);
+            if (id > 0) $gameParty.unlockTosActor(id);
+        } else if (command === 'LockTOSActor') {
+            var id = Number(args[0]);
+            if (id > 0) $gameParty.lockTosActor(id);
         }
     };
 })();
