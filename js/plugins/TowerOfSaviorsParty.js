@@ -1,28 +1,22 @@
 /*:
- * @plugindesc 仿神魔之塔風格的卡片式隊伍編組介面 (強制4人上限 + 可點擊類別選單)
+ * @plugindesc 仿神魔之塔風格的卡片式隊伍編組介面 (剔除空白無名角色 + 僅顯示已獲得 + 4人隊伍)
  * @author 你的名字
  *
  * @param MaxCols
  * @text 背包每行卡片數
- * @desc 下方角色背包網格，每行顯示幾張卡片。
- * @type number
- * @default 5
- *
- * @param CardSize
- * @text 卡片方塊大小
- * @desc 每張角色卡片的寬高像素（建議 84 ~ 112）。
- * @type number
- * @default 96
- *
- * @param MaxPartyMembers
- * @text 隊伍上限人數
- * @desc 戰鬥上場人數上限（固定 4 人，含隊長）。
+ * @desc 下方角色背包網格，每行顯示幾張卡片（手機建議 4）。
  * @type number
  * @default 4
  *
+ * @param CardSize
+ * @text 卡片頭像大小
+ * @desc 每張角色卡片內頭像的顯示像素大小（建議 72 ~ 96）。
+ * @type number
+ * @default 84
+ *
  * @param ExcludedActorIds
  * @text 自動剔除角色ID清單
- * @desc 開啟背包時自動排除的角色 ID，以逗號分隔（預設 163）。
+ * @desc 開啟背包時自動排除的角色 ID，以逗號分隔（例如：163 或 12,163）。空白/無名角色也會自動剔除。
  * @type string
  * @default 163
  *
@@ -47,26 +41,24 @@
  * @help
  * ----------------------------------------------------------------------------
  * 【使用說明】
- * 1. 隊伍上限固定為 4 人（隊長 + 隊員2 + 隊員3 + 隊員4）。
- * 2. 點擊右上角「類別：... [點擊切換類別]」可展開選單：
- *    入手時間、攻擊力、防禦力、生命力、魔法攻擊力、已覺醒、未覺醒。
- * 3. 點擊上方「隊長 / 隊員2~4」可切換要調整的格位；
- *    點擊下方卡片可將角色指派到該格位（已在隊伍者會互換）。
- * 4. 開啟背包時自動剔除角色 ID 163（馬拉•具善）。
+ * 1. 自動剔除規則：
+ *    - 剔除參數 ExcludedActorIds 中指定的角色 ID（預設 163）。
+ *    - 自動剔除資料庫中「沒有名稱」的空白角色格（避免出現只有 Lv.1 的空格）。
+ * 2. 只顯示已獲得角色：
+ *    - 初始隊伍成員與透過事件加入、或使用 UnlockTOSActor 解鎖的角色，
+ *      才會出現在下方網格中；未獲得的角色不會顯示。
+ * 3. 外掛指令：
+ *    - OpenTOSParty          開啟編隊介面
+ *    - UnlockTOSActor ID     將指定角色加入已獲得清單
+ *    - LockTOSActor ID       將指定角色從已獲得清單移除
  * ----------------------------------------------------------------------------
  */
 
 (function() {
     var parameters = PluginManager.parameters('TowerOfSaviorsParty');
-    var maxCols = Number(parameters['MaxCols'] || 5);
-    var cardSize = Number(parameters['CardSize'] || 96);
-    // 強制上限 4 人（確保即使舊參數殘留也不會變成 5 人）
-    var rawMaxParty = Number(parameters['MaxPartyMembers']);
-    var maxParty = (rawMaxParty > 0 && rawMaxParty <= 4) ? rawMaxParty : 4;
-    if (!parameters['MaxPartyMembers']) {
-        maxParty = 4;
-    }
-    maxParty = 4;
+    var maxCols = Number(parameters['MaxCols'] || 4);
+    var cardSize = Number(parameters['CardSize'] || 84);
+    var maxParty = 4;
 
     var excludedRaw = String(parameters['ExcludedActorIds'] || '163');
     var awakenMapRaw = String(parameters['AwakeningSkillMap'] || '');
@@ -116,8 +108,41 @@
     var AWAKENING_SKILL_MAP = parseAwakeningSkillMap();
     var DEFAULT_AWAKEN_SKILLS = parseSkillIdList(defaultAwakenSkillsRaw);
 
-    function isExcludedActor(actorId) {
-        return EXCLUDED_IDS.indexOf(actorId) !== -1;
+    // 判斷是否為無效/空白/指定剔除的角色
+    function isInvalidOrExcludedActor(actorId) {
+        if (!actorId || actorId <= 0) return true;
+        if (EXCLUDED_IDS.indexOf(actorId) !== -1) return true;
+
+        var dActor = $dataActors && $dataActors[actorId];
+        if (!dActor || !dActor.name || dActor.name.trim() === '') {
+            return true;
+        }
+
+        var gActor = $gameActors && $gameActors.actor(actorId);
+        if (!gActor || !gActor.name() || gActor.name().trim() === '') {
+            return true;
+        }
+
+        return false;
+    }
+
+    function drawScaledActorFace(targetBitmap, faceName, faceIndex, dx, dy, dw, dh) {
+        if (!faceName) return;
+        var srcBitmap = ImageManager.loadFace(faceName);
+        var sw = Window_Base._faceWidth || 144;
+        var sh = Window_Base._faceHeight || 144;
+        var sx = (faceIndex % 4) * sw;
+        var sy = Math.floor(faceIndex / 4) * sh;
+
+        var drawAction = function() {
+            targetBitmap.blt(srcBitmap, sx, sy, sw, sh, dx, dy, dw, dh);
+        };
+
+        if (srcBitmap.isReady()) {
+            drawAction();
+        } else {
+            srcBitmap.addLoadListener(drawAction);
+        }
     }
 
     function actorHasSkill(actor, skillId) {
@@ -190,20 +215,24 @@
             this._tosOwnedActors = [];
         }
 
-        this._tosOwnedActors = this._tosOwnedActors.filter(function(id) {
-            return !isExcludedActor(id);
-        });
-
-        this._actors.forEach(function(actorId) {
-            if (!isExcludedActor(actorId) && self._tosOwnedActors.indexOf(actorId) === -1) {
-                self._tosOwnedActors.push(actorId);
+        // 剔除排除清單與空白無名角色，並去除重複
+        var cleanedOwned = [];
+        this._tosOwnedActors.forEach(function(id) {
+            if (!isInvalidOrExcludedActor(id) && cleanedOwned.indexOf(id) === -1) {
+                cleanedOwned.push(id);
             }
         });
 
-        this._actors = this._actors.filter(function(actorId) {
-            return !isExcludedActor(actorId);
+        this._actors.forEach(function(actorId) {
+            if (!isInvalidOrExcludedActor(actorId) && cleanedOwned.indexOf(actorId) === -1) {
+                cleanedOwned.push(actorId);
+            }
         });
+        this._tosOwnedActors = cleanedOwned;
 
+        this._actors = this._actors.filter(function(actorId) {
+            return !isInvalidOrExcludedActor(actorId);
+        });
         while (this._actors.length > maxParty) {
             this._actors.pop();
         }
@@ -215,9 +244,9 @@
     };
 
     Game_Party.prototype.unlockTosActor = function(actorId) {
-        if (isExcludedActor(actorId)) return;
+        if (isInvalidOrExcludedActor(actorId)) return;
         this.cleanupExcludedActors();
-        if ($dataActors[actorId] && this._tosOwnedActors.indexOf(actorId) === -1) {
+        if (this._tosOwnedActors.indexOf(actorId) === -1) {
             this._tosOwnedActors.push(actorId);
         }
     };
@@ -236,7 +265,7 @@
 
     var _Game_Party_addActor = Game_Party.prototype.addActor;
     Game_Party.prototype.addActor = function(actorId) {
-        if (isExcludedActor(actorId)) return;
+        if (isInvalidOrExcludedActor(actorId)) return;
         this.unlockTosActor(actorId);
         _Game_Party_addActor.call(this, actorId);
         while (this._actors.length > maxParty) {
@@ -267,14 +296,14 @@
         var w = this.contentsWidth();
         var h = this.contentsHeight();
 
-        this.contents.fillRect(4, 4, w - 8, h - 8, 'rgba(45, 65, 105, 0.92)');
+        this.contents.fillRect(2, 2, w - 4, h - 4, 'rgba(45, 65, 105, 0.92)');
         this.contents.fontSize = 18;
         this.changeTextColor('#ffd700');
-        this.drawText('▼ 類別：' + mode.label + ' [點此切換]', 12, Math.floor((h - 24) / 2), w - 24, 'center');
+        this.drawText('▼ 類別：' + mode.label + ' [點此切換]', 8, Math.floor((h - 24) / 2), w - 16, 'center');
     };
 
     // ------------------------------------------------------------------------
-    // 2. 類別選單視窗（7 個指定項目）
+    // 2. 類別選單視窗
     // ------------------------------------------------------------------------
     function Window_TOSCategoryMenu() {
         this.initialize.apply(this, arguments);
@@ -335,7 +364,7 @@
     };
 
     Window_TOSPartySlots.prototype.spacing = function() {
-        return 12;
+        return 10;
     };
 
     Window_TOSPartySlots.prototype.drawItem = function(index) {
@@ -348,24 +377,24 @@
             this.contents.fillRect(rect.x, rect.y + rect.height - 4, rect.width, 4, '#ffd700');
         }
 
-        this.contents.fontSize = 16;
+        this.contents.fontSize = 15;
         this.changeTextColor(index === 0 ? '#ffd700' : this.normalColor());
         var roleLabel = (index === 0) ? '隊長' : ('隊員 ' + (index + 1));
-        this.drawText(roleLabel, rect.x + 6, rect.y + 4, rect.width - 12, 'left');
+        this.drawText(roleLabel, rect.x + 4, rect.y + 2, rect.width - 8, 'left');
 
-        if (actor) {
-            var faceSize = Math.min(rect.width - 16, rect.height - 48, cardSize);
+        if (actor && !isInvalidOrExcludedActor(actor.actorId())) {
+            var faceSize = Math.min(rect.width - 12, rect.height - 46, cardSize);
             var faceX = rect.x + Math.floor((rect.width - faceSize) / 2);
-            var faceY = rect.y + 24;
-            this.drawFace(actor.faceName(), actor.faceIndex(), faceX, faceY, faceSize, faceSize);
+            var faceY = rect.y + 22;
+            drawScaledActorFace(this.contents, actor.faceName(), actor.faceIndex(), faceX, faceY, faceSize, faceSize);
 
+            this.contents.fontSize = 14;
+            this.changeTextColor(this.normalColor());
+            this.drawText(actor.name(), rect.x + 2, rect.y + rect.height - 22, rect.width - 4, 'center');
+        } else {
             this.contents.fontSize = 16;
             this.changeTextColor(this.normalColor());
-            this.drawText(actor.name(), rect.x + 4, rect.y + rect.height - 24, rect.width - 8, 'center');
-        } else {
-            this.contents.fontSize = 18;
-            this.changeTextColor(this.normalColor());
-            this.drawText('空位', rect.x, rect.y + Math.floor(rect.height / 2) - 10, rect.width, 'center');
+            this.drawText('空位', rect.x, rect.y + Math.floor(rect.height / 2) - 8, rect.width, 'center');
         }
     };
 
@@ -379,7 +408,7 @@
     };
 
     // ------------------------------------------------------------------------
-    // 4. 下方：神魔風卡片網格背包視窗
+    // 4. 下方：已獲得角色卡片網格視窗
     // ------------------------------------------------------------------------
     function Window_TOSActorGrid() {
         this.initialize.apply(this, arguments);
@@ -403,6 +432,7 @@
         var category = $gameParty.tosCategoryKey();
 
         var list = ownedIds.filter(function(id) {
+            if (isInvalidOrExcludedActor(id)) return false;
             var actor = $gameActors.actor(id);
             if (!actor) return false;
             if (category === 'awakened') {
@@ -443,6 +473,32 @@
         } else if (this.index() < 0 || this.index() >= this.maxItems()) {
             this.select(0);
         }
+        this.drawScrollbar();
+    };
+
+    Window_TOSActorGrid.prototype.setTopRow = function(row) {
+        Window_Selectable.prototype.setTopRow.call(this, row);
+        this.drawScrollbar();
+    };
+
+    Window_TOSActorGrid.prototype.drawScrollbar = function() {
+        var totalRows = Math.ceil(this.maxItems() / this.maxCols());
+        var visibleRows = Math.max(1, Math.floor(this.contentsHeight() / this.itemHeight()));
+        var barWidth = 8;
+        var barX = this.contentsWidth() - barWidth - 2;
+        var trackHeight = this.contentsHeight() - 8;
+
+        this.contents.clearRect(barX - 2, 0, barWidth + 4, this.contentsHeight());
+        if (totalRows <= visibleRows) return;
+
+        this.contents.fillRect(barX, 4, barWidth, trackHeight, 'rgba(255, 255, 255, 0.14)');
+
+        var thumbHeight = Math.max(24, Math.floor(trackHeight * (visibleRows / totalRows)));
+        var maxTopRow = Math.max(1, totalRows - visibleRows);
+        var ratio = Math.min(1, Math.max(0, this.topRow() / maxTopRow));
+        var thumbY = 4 + Math.floor((trackHeight - thumbHeight) * ratio);
+
+        this.contents.fillRect(barX, thumbY, barWidth, thumbHeight, 'rgba(255, 215, 0, 0.78)');
     };
 
     Window_TOSActorGrid.prototype.maxCols = function() {
@@ -454,21 +510,22 @@
     };
 
     Window_TOSActorGrid.prototype.spacing = function() {
-        return 12;
+        return 8;
     };
 
     Window_TOSActorGrid.prototype.itemWidth = function() {
-        return cardSize + 12;
+        var usableW = this.contentsWidth() - 16 - this.spacing() * (this.maxCols() - 1);
+        return Math.max(64, Math.floor(usableW / this.maxCols()));
     };
 
     Window_TOSActorGrid.prototype.itemHeight = function() {
-        return cardSize + 34;
+        return cardSize + 30;
     };
 
     Window_TOSActorGrid.prototype.drawItem = function(index) {
         var actorId = this._actorIds[index];
         var actor = $gameActors.actor(actorId);
-        if (!actor) return;
+        if (!actor || isInvalidOrExcludedActor(actorId)) return;
 
         var rect = this.itemRect(index);
         var isInParty = $gameParty.members().some(function(m) {
@@ -476,29 +533,28 @@
         });
 
         this.contents.fillRect(
-            rect.x + 4,
-            rect.y + 4,
-            rect.width - 8,
-            rect.height - 8,
+            rect.x + 2,
+            rect.y + 2,
+            rect.width - 4,
+            rect.height - 4,
             isInParty ? 'rgba(255, 190, 40, 0.25)' : 'rgba(25, 28, 38, 0.85)'
         );
 
-        var drawW = Math.min(cardSize, rect.width - 16);
-        var drawH = Math.min(cardSize, rect.height - 36);
-        var fx = rect.x + Math.floor((rect.width - drawW) / 2);
-        var fy = rect.y + 8;
-        this.drawFace(actor.faceName(), actor.faceIndex(), fx, fy, drawW, drawH);
+        var drawSize = Math.min(cardSize, rect.width - 12, rect.height - 28);
+        var fx = rect.x + Math.floor((rect.width - drawSize) / 2);
+        var fy = rect.y + 6;
+        drawScaledActorFace(this.contents, actor.faceName(), actor.faceIndex(), fx, fy, drawSize, drawSize);
 
         if (isInParty) {
-            this.contents.fillRect(rect.x + rect.width - 54, rect.y + 8, 46, 20, 'rgba(0, 0, 0, 0.75)');
-            this.contents.fontSize = 13;
+            this.contents.fillRect(rect.x + rect.width - 48, rect.y + 4, 44, 18, 'rgba(0, 0, 0, 0.78)');
+            this.contents.fontSize = 12;
             this.changeTextColor('#ffd700');
-            this.drawText('使用中', rect.x + rect.width - 54, rect.y + 6, 46, 'center');
+            this.drawText('使用中', rect.x + rect.width - 48, rect.y + 2, 44, 'center');
         }
 
-        this.contents.fontSize = 15;
+        this.contents.fontSize = 13;
         this.changeTextColor(isInParty ? '#ffd700' : this.normalColor());
-        this.drawText('Lv.' + actor.level + ' ' + actor.name(), rect.x + 6, rect.y + rect.height - 24, rect.width - 12, 'center');
+        this.drawText('Lv.' + actor.level + ' ' + actor.name(), rect.x + 4, rect.y + rect.height - 22, rect.width - 8, 'center');
     };
 
     Window_TOSActorGrid.prototype.currentActorId = function() {
@@ -506,7 +562,7 @@
     };
 
     // ------------------------------------------------------------------------
-    // 5. 整合場景 Scene_TOSParty（支援滑鼠/觸控直接點擊）
+    // 5. 整合場景 Scene_TOSParty
     // ------------------------------------------------------------------------
     function Scene_TOSParty() {
         this.initialize.apply(this, arguments);
@@ -532,8 +588,8 @@
 
     Scene_TOSParty.prototype.createCategoryBarWindow = function() {
         var wy = this._helpWindow.height;
-        var wh = 56;
-        var bw = Math.min(320, Math.floor(Graphics.boxWidth * 0.45));
+        var wh = 54;
+        var bw = Math.min(320, Math.floor(Graphics.boxWidth * 0.55));
         var bx = Graphics.boxWidth - bw;
         this._categoryBar = new Window_TOSCategoryBar(bx, wy, bw, wh);
         this.addWindow(this._categoryBar);
@@ -541,7 +597,7 @@
 
     Scene_TOSParty.prototype.createPartySlotsWindow = function() {
         var wy = this._categoryBar.y + this._categoryBar.height;
-        var wh = 185;
+        var wh = 175;
         this._slotsWindow = new Window_TOSPartySlots(0, wy, Graphics.boxWidth, wh);
         this._slotsWindow.setHandler('ok', this.onSlotOk.bind(this));
         this._slotsWindow.setHandler('cancel', this.popScene.bind(this));
@@ -579,20 +635,17 @@
             var tx = TouchInput.x;
             var ty = TouchInput.y;
 
-            // 若類別選單已展開
             if (this._categoryMenu && this._categoryMenu.visible && this._categoryMenu.active) {
                 if (!isPointInsideWindow(this._categoryMenu, tx, ty)) {
                     this.closeCategoryMenu();
                     return;
                 }
             } else {
-                // 點擊右上角類別切換條
                 if (isPointInsideWindow(this._categoryBar, tx, ty)) {
                     this.openCategoryMenu();
                     return;
                 }
 
-                // 點擊上方 4 格隊伍位
                 if (isPointInsideWindow(this._slotsWindow, tx, ty)) {
                     var localX = tx - this._slotsWindow.x - this._slotsWindow.padding;
                     var itemW = this._slotsWindow.itemWidth() + this._slotsWindow.spacing();
@@ -647,7 +700,7 @@
         $gameParty.cleanupExcludedActors();
         var targetActorId = this._gridWindow.currentActorId();
         var targetSlot = this._slotsWindow.selectedSlot();
-        if (!targetActorId || isExcludedActor(targetActorId)) {
+        if (!targetActorId || isInvalidOrExcludedActor(targetActorId)) {
             this._gridWindow.refresh();
             this._gridWindow.activate();
             return;
@@ -655,7 +708,7 @@
 
         var members = $gameParty.members()
             .map(function(a) { return a.actorId(); })
-            .filter(function(id) { return !isExcludedActor(id); })
+            .filter(function(id) { return !isInvalidOrExcludedActor(id); })
             .slice(0, 4);
 
         var existingIndex = members.indexOf(targetActorId);
@@ -683,7 +736,7 @@
                 $gameParty.removeActor($gameParty.members()[0].actorId());
             }
             members.forEach(function(id) {
-                if (!isExcludedActor(id)) {
+                if (!isInvalidOrExcludedActor(id)) {
                     $gameParty.addActor(id);
                 }
             });
