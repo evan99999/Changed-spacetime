@@ -1,5 +1,5 @@
 /*:
- * @plugindesc 仿神魔之塔風格的卡片式隊伍編組介面 (剔除空白無名角色 + 僅顯示已獲得 + 4人隊伍)
+ * @plugindesc 仿神魔之塔風格的卡片式隊伍編組介面 (清楚大字藍條 + 獨立改名 + 精準左右切換)
  * @author 你的名字
  *
  * @param MaxCols
@@ -16,7 +16,7 @@
  *
  * @param ExcludedActorIds
  * @text 自動剔除角色ID清單
- * @desc 開啟背包時自動排除的角色 ID，以逗號分隔（例如：163 或 12,163）。空白/無名角色也會自動剔除。
+ * @desc 開啟背包時自動排除的角色 ID，以逗號分隔（預設 163）。空白/無名角色也會自動剔除。
  * @type string
  * @default 163
  *
@@ -40,17 +40,14 @@
  *
  * @help
  * ----------------------------------------------------------------------------
- * 【使用說明】
- * 1. 自動剔除規則：
- *    - 剔除參數 ExcludedActorIds 中指定的角色 ID（預設 163）。
- *    - 自動剔除資料庫中「沒有名稱」的空白角色格（避免出現只有 Lv.1 的空格）。
- * 2. 只顯示已獲得角色：
- *    - 初始隊伍成員與透過事件加入、或使用 UnlockTOSActor 解鎖的角色，
- *      才會出現在下方網格中；未獲得的角色不會顯示。
- * 3. 外掛指令：
- *    - OpenTOSParty          開啟編隊介面
- *    - UnlockTOSActor ID     將指定角色加入已獲得清單
- *    - LockTOSActor ID       將指定角色從已獲得清單移除
+ * 【使用說明 - 藍條操作】
+ * 1. 隊伍切換：
+ *    - 點擊「◀」：上一隊（10 -> 9 -> ... -> 1）
+ *    - 點擊「▶」：下一隊（1 -> 2 -> ... -> 10）
+ * 2. 編輯隊伍名稱：
+ *    - 點擊藍色條右側的「✎ 改名」按鈕，即可開啟輸入視窗修改目前隊伍名稱。
+ * 3. 空隊伍防呆：
+ *    - 若目前隊伍成員為 0 人，無法返回主選單，需放入角色或切換至有成員的隊伍。
  * ----------------------------------------------------------------------------
  */
 
@@ -59,6 +56,8 @@
     var maxCols = Number(parameters['MaxCols'] || 4);
     var cardSize = Number(parameters['CardSize'] || 84);
     var maxParty = 4;
+    var totalParties = 10;
+    var coopPartyIndex = 9; // 第 10 隊（索引 0~9 中的 9）
 
     var excludedRaw = String(parameters['ExcludedActorIds'] || '163');
     var awakenMapRaw = String(parameters['AwakeningSkillMap'] || '');
@@ -108,7 +107,6 @@
     var AWAKENING_SKILL_MAP = parseAwakeningSkillMap();
     var DEFAULT_AWAKEN_SKILLS = parseSkillIdList(defaultAwakenSkillsRaw);
 
-    // 判斷是否為無效/空白/指定剔除的角色
     function isInvalidOrExcludedActor(actorId) {
         if (!actorId || actorId <= 0) return true;
         if (EXCLUDED_IDS.indexOf(actorId) !== -1) return true;
@@ -192,30 +190,176 @@
     }
 
     // ------------------------------------------------------------------------
-    // 擴充 Game_Party
+    // 擴充 Game_Party：10 組隊伍、隊伍名稱、已獲得角色、聯機狀態
     // ------------------------------------------------------------------------
     var _Game_Party_initialize = Game_Party.prototype.initialize;
     Game_Party.prototype.initialize = function() {
         _Game_Party_initialize.call(this);
-        this._tosOwnedActors = [];
-        this._tosCategoryKey = 'obtain';
+        this.initTosData();
+    };
+
+    Game_Party.prototype.initTosData = function() {
+        if (!this._tosOwnedActors) {
+            this._tosOwnedActors = [];
+        }
+        if (!this._tosCategoryKey) {
+            this._tosCategoryKey = 'obtain';
+        }
+        if (!this._tosCoopMode) {
+            this._tosCoopMode = 'none';
+        }
+        if (typeof this._tosCurrentPartyIndex !== 'number') {
+            this._tosCurrentPartyIndex = 0;
+        }
+        if (!Array.isArray(this._tosPartyNames) || this._tosPartyNames.length !== totalParties) {
+            this._tosPartyNames = [];
+            for (var i = 0; i < totalParties; i++) {
+                this._tosPartyNames.push(i === coopPartyIndex ? '聯機模式隊伍' : ('隊伍 ' + (i + 1)));
+            }
+        }
+        if (!Array.isArray(this._tosParties) || this._tosParties.length !== totalParties) {
+            this._tosParties = [];
+            var initialMembers = (this._actors || []).filter(function(id) {
+                return !isInvalidOrExcludedActor(id);
+            }).slice(0, maxParty);
+            for (var j = 0; j < totalParties; j++) {
+                this._tosParties.push(j === 0 ? initialMembers.slice() : []);
+            }
+        }
+    };
+
+    Game_Party.prototype.tosCoopMode = function() {
+        this.initTosData();
+        return this._tosCoopMode;
+    };
+
+    Game_Party.prototype.setTosCoopMode = function(mode) {
+        this.initTosData();
+        if (mode !== 'none' && mode !== 'host' && mode !== 'guest') return;
+        this._tosCoopMode = mode;
+        if (mode === 'guest') {
+            this.switchTosParty(coopPartyIndex, true);
+        }
+    };
+
+    Game_Party.prototype.tosCurrentPartyIndex = function() {
+        this.initTosData();
+        if (this._tosCoopMode === 'guest') {
+            this._tosCurrentPartyIndex = coopPartyIndex;
+        }
+        return this._tosCurrentPartyIndex;
+    };
+
+    Game_Party.prototype.tosPartyName = function(index) {
+        this.initTosData();
+        var idx = (typeof index === 'number') ? index : this.tosCurrentPartyIndex();
+        return this._tosPartyNames[idx] || (idx === coopPartyIndex ? '聯機模式隊伍' : ('隊伍 ' + (idx + 1)));
+    };
+
+    Game_Party.prototype.setTosPartyName = function(index, name) {
+        this.initTosData();
+        if (index < 0 || index >= totalParties) return;
+        var trimmed = String(name || '').trim();
+        if (trimmed) {
+            this._tosPartyNames[index] = trimmed;
+        }
+    };
+
+    Game_Party.prototype.tosPartyMembers = function(index) {
+        this.initTosData();
+        var idx = (typeof index === 'number') ? index : this.tosCurrentPartyIndex();
+        return (this._tosParties[idx] || []).slice(0, maxParty);
+    };
+
+    Game_Party.prototype.setTosPartyMembers = function(index, actorIds) {
+        this.initTosData();
+        if (index < 0 || index >= totalParties) return;
+        var cleaned = (actorIds || []).filter(function(id) {
+            return !isInvalidOrExcludedActor(id);
+        }).slice(0, maxParty);
+        this._tosParties[index] = cleaned;
+        if (index === this.tosCurrentPartyIndex()) {
+            this.syncActivePartyToGameParty();
+        }
+    };
+
+    Game_Party.prototype.syncActivePartyToGameParty = function() {
+        this.initTosData();
+        var activeIds = this.tosPartyMembers(this.tosCurrentPartyIndex());
+        while (this._actors.length > 0) {
+            this._actors.pop();
+        }
+        activeIds.forEach(function(id) {
+            if (!isInvalidOrExcludedActor(id) && this._actors.indexOf(id) === -1) {
+                this._actors.push(id);
+            }
+        }, this);
+    };
+
+    Game_Party.prototype.switchTosParty = function(targetIndex, force) {
+        this.initTosData();
+        if (targetIndex < 0 || targetIndex >= totalParties) return false;
+        if (this._tosCoopMode === 'guest' && targetIndex !== coopPartyIndex && !force) {
+            return false;
+        }
+        this._tosCurrentPartyIndex = targetIndex;
+        this.syncActivePartyToGameParty();
+        return true;
+    };
+
+    Game_Party.prototype.canGuestJoinHostParty = function() {
+        this.initTosData();
+        var coopMembers = this.tosPartyMembers(coopPartyIndex);
+        return coopMembers.length === 1;
+    };
+
+    Game_Party.prototype.canHostAcceptPlayer = function() {
+        this.initTosData();
+        if (this._tosCoopMode !== 'host') return false;
+        if (this.tosCurrentPartyIndex() !== coopPartyIndex) return false;
+        return this.tosPartyMembers(coopPartyIndex).length < maxParty;
+    };
+
+    Game_Party.prototype.addCoopActorToParty10 = function(actorId) {
+        this.initTosData();
+        if (this._tosCoopMode !== 'host') {
+            return { ok: false, reason: '目前非房主模式' };
+        }
+        if (this.tosCurrentPartyIndex() !== coopPartyIndex) {
+            return { ok: false, reason: '房主必須先將隊伍切換成第 10 隊（聯機模式隊伍）才能讓玩家加入' };
+        }
+        var coopMembers = this.tosPartyMembers(coopPartyIndex);
+        if (coopMembers.length >= maxParty) {
+            return { ok: false, reason: '第 10 隊已滿（4 人），請先空出位置' };
+        }
+        if (isInvalidOrExcludedActor(actorId)) {
+            return { ok: false, reason: '無效或已剔除的角色 ID' };
+        }
+        if (coopMembers.indexOf(actorId) === -1) {
+            coopMembers.push(actorId);
+            this.setTosPartyMembers(coopPartyIndex, coopMembers);
+        }
+        return { ok: true, reason: '已將玩家角色加入第 10 隊' };
+    };
+
+    Game_Party.prototype.clearTosParty10 = function() {
+        this.initTosData();
+        this.setTosPartyMembers(coopPartyIndex, []);
     };
 
     Game_Party.prototype.tosCategoryKey = function() {
+        this.initTosData();
         return this._tosCategoryKey || 'obtain';
     };
 
     Game_Party.prototype.setTosCategoryKey = function(key) {
+        this.initTosData();
         this._tosCategoryKey = key;
     };
 
     Game_Party.prototype.cleanupExcludedActors = function() {
-        var self = this;
-        if (!this._tosOwnedActors) {
-            this._tosOwnedActors = [];
-        }
+        this.initTosData();
 
-        // 剔除排除清單與空白無名角色，並去除重複
         var cleanedOwned = [];
         this._tosOwnedActors.forEach(function(id) {
             if (!isInvalidOrExcludedActor(id) && cleanedOwned.indexOf(id) === -1) {
@@ -223,19 +367,31 @@
             }
         });
 
+        for (var p = 0; p < totalParties; p++) {
+            var filteredParty = (this._tosParties[p] || []).filter(function(id) {
+                return !isInvalidOrExcludedActor(id);
+            }).slice(0, maxParty);
+            this._tosParties[p] = filteredParty;
+
+            filteredParty.forEach(function(actorId) {
+                if (cleanedOwned.indexOf(actorId) === -1) {
+                    cleanedOwned.push(actorId);
+                }
+            });
+        }
+
         this._actors.forEach(function(actorId) {
             if (!isInvalidOrExcludedActor(actorId) && cleanedOwned.indexOf(actorId) === -1) {
                 cleanedOwned.push(actorId);
             }
         });
+
         this._tosOwnedActors = cleanedOwned;
 
-        this._actors = this._actors.filter(function(actorId) {
-            return !isInvalidOrExcludedActor(actorId);
-        });
-        while (this._actors.length > maxParty) {
-            this._actors.pop();
+        if (this._tosCoopMode === 'guest') {
+            this._tosCurrentPartyIndex = coopPartyIndex;
         }
+        this.syncActivePartyToGameParty();
     };
 
     Game_Party.prototype.tosOwnedActors = function() {
@@ -257,16 +413,24 @@
         if (idx !== -1) {
             this._tosOwnedActors.splice(idx, 1);
         }
-        var partyIdx = this._actors.indexOf(actorId);
-        if (partyIdx !== -1 && this._actors.length > 1) {
-            this._actors.splice(partyIdx, 1);
+        for (var p = 0; p < totalParties; p++) {
+            this._tosParties[p] = (this._tosParties[p] || []).filter(function(id) {
+                return id !== actorId;
+            });
         }
+        this.syncActivePartyToGameParty();
     };
 
     var _Game_Party_addActor = Game_Party.prototype.addActor;
     Game_Party.prototype.addActor = function(actorId) {
         if (isInvalidOrExcludedActor(actorId)) return;
         this.unlockTosActor(actorId);
+        var curIdx = this.tosCurrentPartyIndex();
+        var list = this.tosPartyMembers(curIdx);
+        if (list.indexOf(actorId) === -1 && list.length < maxParty) {
+            list.push(actorId);
+            this.setTosPartyMembers(curIdx, list);
+        }
         _Game_Party_addActor.call(this, actorId);
         while (this._actors.length > maxParty) {
             this._actors.pop();
@@ -274,7 +438,95 @@
     };
 
     // ------------------------------------------------------------------------
-    // 1. 類別切換列視窗
+    // 1. 藍色條狀區左側：10 隊伍切換與改名條（清楚大字 + 獨立按鈕區域）
+    // ------------------------------------------------------------------------
+    function Window_TOSPartySwitchBar() {
+        this.initialize.apply(this, arguments);
+    }
+
+    Window_TOSPartySwitchBar.prototype = Object.create(Window_Base.prototype);
+    Window_TOSPartySwitchBar.prototype.constructor = Window_TOSPartySwitchBar;
+
+    Window_TOSPartySwitchBar.prototype.initialize = function(x, y, width, height) {
+        Window_Base.prototype.initialize.call(this, x, y, width, height);
+        this._hitAreas = { prev: null, next: null, rename: null };
+        this.refresh();
+    };
+
+    Window_TOSPartySwitchBar.prototype.standardPadding = function() {
+        return 8;
+    };
+
+    Window_TOSPartySwitchBar.prototype.refresh = function() {
+        this.contents.clear();
+        var idx = $gameParty.tosCurrentPartyIndex();
+        var pName = $gameParty.tosPartyName(idx);
+        var mode = $gameParty.tosCoopMode();
+
+        var w = this.contentsWidth();
+        var h = this.contentsHeight();
+
+        // 藍底背景
+        this.contents.fillRect(0, 0, w, h, 'rgba(28, 82, 165, 0.95)');
+
+        // 計算各按鈕在「視窗內容區」的 X 座標，並換算為「全畫面座標」供點擊偵測
+        var btnH = Math.max(28, h - 8);
+        var btnY = Math.floor((h - btnH) / 2);
+        var prevW = 36;
+        var nextW = 36;
+        var renameW = 74;
+        var gap = 4;
+
+        var prevX = 4;
+        var nextX = prevX + prevW + gap;
+        var renameX = w - renameW - 4;
+        var nameX = nextX + nextW + gap;
+        var nameW = Math.max(40, renameX - nameX - gap);
+
+        // 繪製 [◀]
+        this.contents.fillRect(prevX, btnY, prevW, btnH, 'rgba(15, 45, 95, 0.9)');
+        this.contents.fontSize = 18;
+        this.changeTextColor('#ffffff');
+        this.drawText('◀', prevX, btnY + Math.floor((btnH - 24) / 2), prevW, 'center');
+
+        // 繪製 [▶]
+        this.contents.fillRect(nextX, btnY, nextW, btnH, 'rgba(15, 45, 95, 0.9)');
+        this.drawText('▶', nextX, btnY + Math.floor((btnH - 24) / 2), nextW, 'center');
+
+        // 繪製隊伍編號與名稱
+        var modeTag = mode === 'guest' ? ' [鎖10]' : (mode === 'host' && idx === coopPartyIndex ? ' [聯機]' : '');
+        var titleText = (idx + 1) + '/' + totalParties + ' ' + pName + modeTag;
+        this.contents.fontSize = 18;
+        this.changeTextColor('#ffffff');
+        this.drawText(titleText, nameX, btnY + Math.floor((btnH - 24) / 2), nameW, 'left');
+
+        // 繪製 [✎ 改名] 按鈕
+        this.contents.fillRect(renameX, btnY, renameW, btnH, 'rgba(240, 180, 20, 0.95)');
+        this.contents.fontSize = 16;
+        this.changeTextColor('#111111');
+        this.drawText('✎ 改名', renameX, btnY + Math.floor((btnH - 24) / 2), renameW, 'center');
+
+        var ox = this.x + this.padding;
+        var oy = this.y + this.padding;
+        this._hitAreas = {
+            prev:   { x: ox + prevX,   y: oy + btnY, w: prevW,   h: btnH },
+            next:   { x: ox + nextX,   y: oy + btnY, w: nextW,   h: btnH },
+            rename: { x: ox + renameX, y: oy + btnY, w: renameW, h: btnH }
+        };
+    };
+
+    Window_TOSPartySwitchBar.prototype.detectHitAction = function(gx, gy) {
+        var hit = function(box) {
+            return box && gx >= box.x && gx <= box.x + box.w && gy >= box.y && gy <= box.y + box.h;
+        };
+        if (hit(this._hitAreas.prev)) return 'prev';
+        if (hit(this._hitAreas.next)) return 'next';
+        if (hit(this._hitAreas.rename)) return 'rename';
+        return null;
+    };
+
+    // ------------------------------------------------------------------------
+    // 2. 類別切換列視窗（藍色條狀區右側）
     // ------------------------------------------------------------------------
     function Window_TOSCategoryBar() {
         this.initialize.apply(this, arguments);
@@ -288,6 +540,10 @@
         this.refresh();
     };
 
+    Window_TOSCategoryBar.prototype.standardPadding = function() {
+        return 8;
+    };
+
     Window_TOSCategoryBar.prototype.refresh = function() {
         this.contents.clear();
         var key = $gameParty.tosCategoryKey();
@@ -296,14 +552,14 @@
         var w = this.contentsWidth();
         var h = this.contentsHeight();
 
-        this.contents.fillRect(2, 2, w - 4, h - 4, 'rgba(45, 65, 105, 0.92)');
-        this.contents.fontSize = 18;
+        this.contents.fillRect(0, 0, w, h, 'rgba(45, 65, 105, 0.95)');
+        this.contents.fontSize = 17;
         this.changeTextColor('#ffd700');
-        this.drawText('▼ 類別：' + mode.label + ' [點此切換]', 8, Math.floor((h - 24) / 2), w - 16, 'center');
+        this.drawText('▼ ' + mode.label, 4, Math.floor((h - 24) / 2), w - 8, 'center');
     };
 
     // ------------------------------------------------------------------------
-    // 2. 類別選單視窗
+    // 3. 類別選單視窗
     // ------------------------------------------------------------------------
     function Window_TOSCategoryMenu() {
         this.initialize.apply(this, arguments);
@@ -332,7 +588,7 @@
     };
 
     // ------------------------------------------------------------------------
-    // 3. 上方：目前隊伍欄位視窗（固定 4 人）
+    // 4. 上方：目前隊伍欄位視窗（固定 4 人）
     // ------------------------------------------------------------------------
     function Window_TOSPartySlots() {
         this.initialize.apply(this, arguments);
@@ -369,7 +625,9 @@
 
     Window_TOSPartySlots.prototype.drawItem = function(index) {
         var rect = this.itemRectForText(index);
-        var actor = $gameParty.members()[index] || null;
+        var partyMembers = $gameParty.tosPartyMembers($gameParty.tosCurrentPartyIndex());
+        var actorId = partyMembers[index] || null;
+        var actor = actorId ? $gameActors.actor(actorId) : null;
 
         this.contents.fillRect(rect.x, rect.y, rect.width, rect.height, 'rgba(30, 35, 50, 0.85)');
         if (index === this._selectedSlot) {
@@ -408,7 +666,7 @@
     };
 
     // ------------------------------------------------------------------------
-    // 4. 下方：已獲得角色卡片網格視窗
+    // 5. 下方：已獲得角色卡片網格視窗
     // ------------------------------------------------------------------------
     function Window_TOSActorGrid() {
         this.initialize.apply(this, arguments);
@@ -528,9 +786,8 @@
         if (!actor || isInvalidOrExcludedActor(actorId)) return;
 
         var rect = this.itemRect(index);
-        var isInParty = $gameParty.members().some(function(m) {
-            return m.actorId() === actorId;
-        });
+        var curParty = $gameParty.tosPartyMembers($gameParty.tosCurrentPartyIndex());
+        var isInParty = curParty.indexOf(actorId) !== -1;
 
         this.contents.fillRect(
             rect.x + 2,
@@ -562,7 +819,7 @@
     };
 
     // ------------------------------------------------------------------------
-    // 5. 整合場景 Scene_TOSParty
+    // 6. 整合場景 Scene_TOSParty
     // ------------------------------------------------------------------------
     function Scene_TOSParty() {
         this.initialize.apply(this, arguments);
@@ -579,28 +836,50 @@
     Scene_TOSParty.prototype.create = function() {
         Scene_MenuBase.prototype.create.call(this);
         this.createHelpWindow();
-        this.createCategoryBarWindow();
+        this.createBlueStripBars();
         this.createPartySlotsWindow();
         this.createActorGridWindow();
         this.createCategoryMenuWindow();
         this.updateHelpText();
     };
 
-    Scene_TOSParty.prototype.createCategoryBarWindow = function() {
+    Scene_TOSParty.prototype.tryExitScene = function() {
+        var curIdx = $gameParty.tosCurrentPartyIndex();
+        var currentMembers = $gameParty.tosPartyMembers(curIdx);
+
+        if (!currentMembers || currentMembers.length === 0) {
+            SoundManager.playBuzzer();
+            var pName = $gameParty.tosPartyName(curIdx);
+            this._helpWindow.setText(
+                '\\C[18]【無法返回】第' + (curIdx + 1) + '隊（' + pName + '）沒有任何成員！請放入角色或切換至有成員的隊伍\\C[0]'
+            );
+            this._gridWindow.activate();
+            return;
+        }
+
+        $gameParty.syncActivePartyToGameParty();
+        this.popScene();
+    };
+
+    Scene_TOSParty.prototype.createBlueStripBars = function() {
         var wy = this._helpWindow.height;
-        var wh = 54;
-        var bw = Math.min(320, Math.floor(Graphics.boxWidth * 0.55));
-        var bx = Graphics.boxWidth - bw;
-        this._categoryBar = new Window_TOSCategoryBar(bx, wy, bw, wh);
+        var wh = 64;
+        var catW = Math.min(165, Math.floor(Graphics.boxWidth * 0.30));
+        var partyW = Graphics.boxWidth - catW;
+
+        this._partySwitchBar = new Window_TOSPartySwitchBar(0, wy, partyW, wh);
+        this._categoryBar = new Window_TOSCategoryBar(partyW, wy, catW, wh);
+
+        this.addWindow(this._partySwitchBar);
         this.addWindow(this._categoryBar);
     };
 
     Scene_TOSParty.prototype.createPartySlotsWindow = function() {
-        var wy = this._categoryBar.y + this._categoryBar.height;
+        var wy = this._partySwitchBar.y + this._partySwitchBar.height;
         var wh = 175;
         this._slotsWindow = new Window_TOSPartySlots(0, wy, Graphics.boxWidth, wh);
         this._slotsWindow.setHandler('ok', this.onSlotOk.bind(this));
-        this._slotsWindow.setHandler('cancel', this.popScene.bind(this));
+        this._slotsWindow.setHandler('cancel', this.tryExitScene.bind(this));
         this._slotsWindow.deactivate();
         this.addWindow(this._slotsWindow);
     };
@@ -610,7 +889,7 @@
         var wh = Graphics.boxHeight - wy;
         this._gridWindow = new Window_TOSActorGrid(0, wy, Graphics.boxWidth, wh);
         this._gridWindow.setHandler('ok', this.onGridOk.bind(this));
-        this._gridWindow.setHandler('cancel', this.popScene.bind(this));
+        this._gridWindow.setHandler('cancel', this.tryExitScene.bind(this));
         this.addWindow(this._gridWindow);
     };
 
@@ -628,6 +907,63 @@
         this.addWindow(this._categoryMenu);
     };
 
+    Scene_TOSParty.prototype.renameCurrentParty = function() {
+        var idx = $gameParty.tosCurrentPartyIndex();
+        var oldName = $gameParty.tosPartyName(idx);
+        var input = null;
+
+        try {
+            input = window.prompt('請輸入第 ' + (idx + 1) + ' 組隊伍名稱：', oldName);
+        } catch (e) {
+            input = null;
+        }
+
+        if (input !== null && String(input).trim() !== '') {
+            $gameParty.setTosPartyName(idx, String(input).trim());
+            SoundManager.playOk();
+            this._partySwitchBar.refresh();
+            this.updateHelpText();
+        } else {
+            // 若環境封鎖 prompt 或按取消，提示可用外掛指令或重試
+            SoundManager.playBuzzer();
+            this._helpWindow.setText('未變更隊伍名稱（若瀏覽器封鎖彈窗，可使用外掛指令 RenameTOSParty 編號 名稱）');
+        }
+        this._gridWindow.activate();
+    };
+
+    Scene_TOSParty.prototype.cycleParty = function(delta) {
+        var mode = $gameParty.tosCoopMode();
+        if (mode === 'guest') {
+            SoundManager.playBuzzer();
+            this._helpWindow.setText('\\C[18]聯機加入他人房間後，只能使用第 10 隊（聯機模式隊伍）！\\C[0]');
+            return;
+        }
+        var cur = $gameParty.tosCurrentPartyIndex();
+        // 順向 delta = +1：0 -> 1 -> 2 ... -> 9（顯示 1/10 -> 2/10 -> ... -> 10/10）
+        // 逆向 delta = -1：9 -> 8 -> ... -> 0（顯示 10/10 -> 9/10 -> ... -> 1/10）
+        var next = (cur + delta + totalParties) % totalParties;
+        $gameParty.switchTosParty(next, false);
+        SoundManager.playCursor();
+        this._partySwitchBar.refresh();
+        this._slotsWindow.refresh();
+        this._gridWindow.refresh();
+        this.updateHelpText();
+    };
+
+    Scene_TOSParty.prototype.clearSlotActor = function(slotIndex) {
+        var pIdx = $gameParty.tosCurrentPartyIndex();
+        var members = $gameParty.tosPartyMembers(pIdx).slice();
+        if (slotIndex < 0 || slotIndex >= members.length) return;
+
+        members.splice(slotIndex, 1);
+        $gameParty.setTosPartyMembers(pIdx, members);
+        SoundManager.playCancel();
+        this._slotsWindow.refresh();
+        this._gridWindow.refresh();
+        this._partySwitchBar.refresh();
+        this.updateHelpText();
+    };
+
     Scene_TOSParty.prototype.update = function() {
         Scene_MenuBase.prototype.update.call(this);
 
@@ -641,20 +977,44 @@
                     return;
                 }
             } else {
+                // 點擊藍色條狀區左側：精準判斷 ◀ / ▶ / ✎ 改名
+                if (isPointInsideWindow(this._partySwitchBar, tx, ty)) {
+                    var action = this._partySwitchBar.detectHitAction(tx, ty);
+                    if (action === 'prev') {
+                        this.cycleParty(-1);
+                        return;
+                    }
+                    if (action === 'next') {
+                        this.cycleParty(1);
+                        return;
+                    }
+                    if (action === 'rename') {
+                        this.renameCurrentParty();
+                        return;
+                    }
+                    return;
+                }
+
+                // 點擊藍色條狀區右側：類別切換
                 if (isPointInsideWindow(this._categoryBar, tx, ty)) {
                     this.openCategoryMenu();
                     return;
                 }
 
+                // 點擊上方 4 格隊伍位（再次點擊已選中的格位可清空該格角色）
                 if (isPointInsideWindow(this._slotsWindow, tx, ty)) {
                     var localX = tx - this._slotsWindow.x - this._slotsWindow.padding;
                     var itemW = this._slotsWindow.itemWidth() + this._slotsWindow.spacing();
                     var clickedSlot = Math.floor(localX / itemW);
                     if (clickedSlot >= 0 && clickedSlot < 4) {
-                        this._slotsWindow.select(clickedSlot);
-                        this._slotsWindow.setSelectedSlot(clickedSlot);
+                        if (this._slotsWindow.selectedSlot() === clickedSlot) {
+                            this.clearSlotActor(clickedSlot);
+                        } else {
+                            this._slotsWindow.select(clickedSlot);
+                            this._slotsWindow.setSelectedSlot(clickedSlot);
+                            this.updateHelpText();
+                        }
                         this._gridWindow.activate();
-                        this.updateHelpText();
                         return;
                     }
                 }
@@ -689,10 +1049,28 @@
         var slot = this._slotsWindow.selectedSlot();
         var roleText = (slot === 0) ? '隊長位' : ('隊員第 ' + (slot + 1) + ' 格');
         var shownCount = this._gridWindow ? this._gridWindow.maxItems() : 0;
-        var catKey = $gameParty.tosCategoryKey();
-        var catObj = CATEGORY_MODES.find(function(m) { return m.key === catKey; }) || CATEGORY_MODES[0];
+        var pIdx = $gameParty.tosCurrentPartyIndex();
+        var pName = $gameParty.tosPartyName(pIdx);
+        var curMembersCount = $gameParty.tosPartyMembers(pIdx).length;
+        var mode = $gameParty.tosCoopMode();
+        var modeNote = '';
+
+        if (curMembersCount === 0) {
+            modeNote = '｜\\C[18]空隊伍（不可返回，請先選入角色或切換他隊）\\C[0]';
+        } else if (mode === 'guest') {
+            var count10 = $gameParty.tosPartyMembers(coopPartyIndex).length;
+            modeNote = '｜房客(限第10隊:' + count10 + '人,' + (count10 === 1 ? '可入房主隊' : '需留1人') + ')';
+        } else if (mode === 'host') {
+            if (pIdx === coopPartyIndex) {
+                var freeSlots = maxParty - $gameParty.tosPartyMembers(coopPartyIndex).length;
+                modeNote = '｜房主(第10隊空位' + freeSlots + '格,可讓玩家加入)';
+            } else {
+                modeNote = '｜房主(請切換至第10隊才可讓玩家加入)';
+            }
+        }
+
         this._helpWindow.setText(
-            '目標：【' + roleText + '】（上限 4 人）｜類別：' + catObj.label + '（顯示 ' + shownCount + ' 位）'
+            '【第' + (pIdx + 1) + '隊:' + pName + '】目標:' + roleText + '｜顯示 ' + shownCount + ' 位' + modeNote
         );
     };
 
@@ -706,11 +1084,8 @@
             return;
         }
 
-        var members = $gameParty.members()
-            .map(function(a) { return a.actorId(); })
-            .filter(function(id) { return !isInvalidOrExcludedActor(id); })
-            .slice(0, 4);
-
+        var pIdx = $gameParty.tosCurrentPartyIndex();
+        var members = $gameParty.tosPartyMembers(pIdx).slice(0, maxParty);
         var existingIndex = members.indexOf(targetActorId);
 
         if (existingIndex !== -1) {
@@ -722,28 +1097,17 @@
         } else {
             if (targetSlot < members.length) {
                 members[targetSlot] = targetActorId;
-            } else if (members.length < 4) {
+            } else if (members.length < maxParty) {
                 members.push(targetActorId);
             } else {
                 members[members.length - 1] = targetActorId;
             }
         }
 
-        members = members.slice(0, 4);
-
-        if (members.length > 0) {
-            while ($gameParty.members().length > 0) {
-                $gameParty.removeActor($gameParty.members()[0].actorId());
-            }
-            members.forEach(function(id) {
-                if (!isInvalidOrExcludedActor(id)) {
-                    $gameParty.addActor(id);
-                }
-            });
-        }
-
+        $gameParty.setTosPartyMembers(pIdx, members.slice(0, maxParty));
         this._slotsWindow.refresh();
         this._gridWindow.refresh();
+        this._partySwitchBar.refresh();
         this.updateHelpText();
         this._gridWindow.activate();
     };
@@ -756,7 +1120,7 @@
     };
 
     // ------------------------------------------------------------------------
-    // 6. 掛載到主選單「隊形」與外掛指令
+    // 7. 掛載到主選單「隊形」與外掛指令
     // ------------------------------------------------------------------------
     if (hookFormation) {
         Scene_Menu.prototype.commandFormation = function() {
@@ -769,6 +1133,20 @@
         _Game_Interpreter_pluginCommand.call(this, command, args);
         if (command === 'OpenTOSParty') {
             SceneManager.push(Scene_TOSParty);
+        } else if (command === 'SetTOSCoopMode') {
+            var m = String(args[0] || 'none').toLowerCase();
+            $gameParty.setTosCoopMode(m);
+        } else if (command === 'RenameTOSParty') {
+            var pNum = Number(args[0]);
+            var newName = args.slice(1).join(' ');
+            if (pNum >= 1 && pNum <= totalParties && newName) {
+                $gameParty.setTosPartyName(pNum - 1, newName);
+            }
+        } else if (command === 'AddCoopActorTo10') {
+            var actorId = Number(args[0]);
+            $gameParty.addCoopActorToParty10(actorId);
+        } else if (command === 'ClearTOSParty10') {
+            $gameParty.clearTosParty10();
         } else if (command === 'UnlockTOSActor') {
             var id = Number(args[0]);
             if (id > 0) $gameParty.unlockTosActor(id);
